@@ -1,0 +1,133 @@
+name: CI - Build, Scan & Deploy (GitOps)
+
+# Se déclenche à chaque push sur main touchant l'app (pas les docs/README)
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+
+env:
+  IMAGE_NAME: ghcr.io/khaoula-dr/secure-gitops-pipeline
+  INFRA_REPO: khaoula-dr/secure-gitops-pipeline-infra
+  INFRA_OVERLAY_PATH: overlays/dev
+
+permissions:
+  contents: read
+  packages: write   # nécessaire pour pousser l'image sur GHCR avec GITHUB_TOKEN
+
+jobs:
+  # ---------------------------------------------------------------------
+  # 1. Scan de secrets — en premier, avant même de builder quoi que ce soit
+  # ---------------------------------------------------------------------
+  secrets-scan:
+    name: Gitleaks (secrets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # Gitleaks a besoin de tout l'historique pour bien scanner
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------
+  # 2. SAST — analyse statique du code source
+  # ---------------------------------------------------------------------
+  sast-scan:
+    name: Semgrep (SAST)
+    runs-on: ubuntu-latest
+    needs: secrets-scan
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: p/security-audit p/python
+
+  # ---------------------------------------------------------------------
+  # 3. Build de l'image + scan Trivy + publication GHCR
+  # ---------------------------------------------------------------------
+  build-scan-push:
+    name: Build, Trivy scan & push
+    runs-on: ubuntu-latest
+    needs: [secrets-scan, sast-scan]
+    outputs:
+      image_tag: ${{ steps.vars.outputs.sha_short }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set short SHA as image tag
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (chargée localement, pas encore poussée)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}
+
+      # Scan de l'image AVANT de la publier — on ne pousse jamais une image
+      # non scannée sur le registre.
+      - name: Trivy scan (image)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: "1"   # fait échouer le job si une vulnérabilité CRITICAL/HIGH est trouvée
+          ignore-unfixed: true
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image to GHCR
+        run: docker push ${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}
+
+  # ---------------------------------------------------------------------
+  # 4. Fermer la boucle GitOps : mettre à jour le tag d'image dans l'overlay
+  #    Kustomize du repo infra (déclenchera la synchronisation ArgoCD)
+  # ---------------------------------------------------------------------
+  update-infra:
+    name: Update infra repo (Kustomize)
+    runs-on: ubuntu-latest
+    needs: build-scan-push
+    steps:
+      - name: Checkout infra repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.INFRA_REPO }}
+          token: ${{ secrets.INFRA_REPO_PAT }}
+          path: infra
+
+      - name: Install kustomize
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+
+      - name: Set new image tag via Kustomize
+        working-directory: infra/${{ env.INFRA_OVERLAY_PATH }}
+        run: |
+          kustomize edit set image myapp=${{ env.IMAGE_NAME }}:${{ needs.build-scan-push.outputs.image_tag }}
+
+      - name: Commit & push
+        working-directory: infra
+        run: |
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git add "${{ env.INFRA_OVERLAY_PATH }}/kustomization.yaml"
+          git commit -m "chore: bump secure-gitops-pipeline image to ${{ needs.build-scan-push.outputs.image_tag }}"
+          git push
