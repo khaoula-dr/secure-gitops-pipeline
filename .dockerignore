@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+
+# Git / CI
+.git
+.gitignore
+.github/
+
+# Docs et divers
+*.md
+README*
+
+# Tests (pas nécessaires dans l'image finale)
+tests/
+
+# Config locale / secrets
+.env
+.env.*
+docker-compose.yml
+
+# Kustomize / manifests K8s (vivent dans le repo infra, pas dans l'image)
+k8s/
+overlays/
+base/
+
+# Éditeurs / OS
+.vscode/
+.idea/
+.DS_Store
