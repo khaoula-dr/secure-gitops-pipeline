@@ -1,8 +1,8 @@
 # demo-api — Application de démo pour le projet GitOps/ArgoCD/Kustomize
 
-Petite API Flask servant de "repo application" pour le projet GitOps décrit dans le
+Petite API Flask servant  de "repo application" pour le projet GitOps décrit dans le
 cahier des charges. Elle expose volontairement des endpoints distincts pour la
-liveness probe et la readiness probe, afin de démontrer la différence en Kubernetes.
+liveness probe et la readiness probe, pour démontrer la différence en Kubernetes.
 
 ## Endpoints
 
