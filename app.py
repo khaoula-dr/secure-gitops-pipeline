@@ -1,59 +1,139 @@
-import os
-from datetime import datetime, timezone
+name: CI - Build, Scan & Deploy (GitOps)
 
-from flask import Flask, jsonify
+# Se déclenche à chaque push sur main touchant l'app (pas les docs/README)
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
 
-app = Flask(__name__)
+env:
+  IMAGE_NAME: ghcr.io/khaoula-dr/secure-gitops-pipeline
+  INFRA_REPO: khaoula-dr/secure-gitops-pipeline-infra
+  INFRA_OVERLAY_PATH: overlays/dev
 
-APP_NAME = os.environ.get("APP_NAME", "demo-api")
-APP_VERSION = os.environ.get("APP_VERSION", "dev")
+permissions:
+  contents: read
+  packages: write   # nécessaire pour pousser l'image sur GHCR avec GITHUB_TOKEN
 
+jobs:
+  # ---------------------------------------------------------------------
+  # 1. Scan de secrets — en premier, avant même de builder quoi que ce soit
+  # ---------------------------------------------------------------------
+  secrets-scan:
+    name: Gitleaks (secrets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # Gitleaks a besoin de tout l'historique pour bien scanner
 
-@app.get("/")
-def root():
-    return jsonify(
-        {
-            "app": APP_NAME,
-            "version": APP_VERSION,
-            "message": "Bienvenue sur l'API de démo GitOps",
-        }
-    )
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # ---------------------------------------------------------------------
+  # 2. SAST — analyse statique du code source
+  # ---------------------------------------------------------------------
+  sast-scan:
+    name: Semgrep (SAST)
+    runs-on: ubuntu-latest
+    needs: secrets-scan
+    steps:
+      - uses: actions/checkout@v4
 
-@app.get("/health")
-def health():
-    """Liveness probe : le process répond-il encore ?
-    Kubernetes redémarre le pod si ce endpoint échoue."""
-    return jsonify({"status": "ok"}), 200
+      - name: Run Semgrep
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: p/security-audit p/python
 
+  # ---------------------------------------------------------------------
+  # 3. Build de l'image + scan Trivy + publication GHCR
+  # ---------------------------------------------------------------------
+  build-scan-push:
+    name: Build, Trivy scan & push
+    runs-on: ubuntu-latest
+    needs: [secrets-scan, sast-scan]
+    outputs:
+      image_tag: ${{ steps.vars.outputs.sha_short }}
+    steps:
+      - uses: actions/checkout@v4
 
-@app.get("/ready")
-def ready():
-    """Readiness probe : l'app est-elle prête à recevoir du trafic ?
-    Kubernetes retire le pod du Service (sans le redémarrer) si ce endpoint échoue.
-    Ici on pourrait vérifier une connexion DB, un cache, etc."""
-    return jsonify({"status": "ready"}), 200
+      - name: Set short SHA as image tag
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-@app.get("/info")
-def info():
-    return jsonify(
-        {
-            "app": APP_NAME,
-            "version": APP_VERSION,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "hostname": os.uname().nodename,
-        }
-    )
+      - name: Build image (chargée localement, pas encore poussée)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}
 
+      # Scan de l'image AVANT de la publier — on ne pousse jamais une image
+      # non scannée sur le registre.
+      # NOTE SÉCURITÉ (mars 2026) : aquasecurity/trivy-action a subi une attaque de
+      # la chaîne d'approvisionnement — 76 des 77 anciens tags (dont ceux < v0.35.0)
+      # ont été force-pushés par un attaquant pour voler des credentials CI/CD.
+      # Seul le tag v0.35.0 était confirmé non compromis ; les tags récents utilisent
+      # désormais le préfixe "v". On épingle donc explicitement une version saine
+      # et récente, à re-vérifier périodiquement (https://github.com/aquasecurity/trivy-action/security/advisories).
+      - name: Trivy scan (image)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: "1"   # fait échouer le job si une vulnérabilité CRITICAL/HIGH est trouvée
+          ignore-unfixed: true
 
-if __name__ == "__main__":
-    # Ce bloc ne sert que pour le développement local (`python app.py`).
-    # En production/conteneur, c'est gunicorn (voir Dockerfile) qui sert l'app
-    # et qui écoute sur 0.0.0.0 — nécessaire pour recevoir le trafic entrant
-    # du conteneur, avec l'isolation réseau du Pod comme protection.
-    # Le serveur de dev Flask, lui, n'a aucune raison d'être exposé au-delà
-    # de la machine locale : on limite donc son bind à 127.0.0.1 par défaut.
-    port = int(os.environ.get("PORT", 8080))
-    host = os.environ.get("FLASK_DEV_HOST", "127.0.0.1")
-    app.run(host=host, port=port)
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image to GHCR
+        run: docker push ${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}
+
+  # ---------------------------------------------------------------------
+  # 4. Fermer la boucle GitOps : mettre à jour le tag d'image dans l'overlay
+  #    Kustomize du repo infra (déclenchera la synchronisation ArgoCD)
+  # ---------------------------------------------------------------------
+  update-infra:
+    name: Update infra repo (Kustomize)
+    runs-on: ubuntu-latest
+    needs: build-scan-push
+    steps:
+      - name: Checkout infra repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.INFRA_REPO }}
+          token: ${{ secrets.INFRA_REPO_PAT }}
+          path: infra
+
+      - name: Install kustomize
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+
+      - name: Set new image tag via Kustomize
+        working-directory: infra/${{ env.INFRA_OVERLAY_PATH }}
+        run: |
+          kustomize edit set image myapp=${{ env.IMAGE_NAME }}:${{ needs.build-scan-push.outputs.image_tag }}
+
+      - name: Commit & push
+        working-directory: infra
+        run: |
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git add "${{ env.INFRA_OVERLAY_PATH }}/kustomization.yaml"
+          git commit -m "chore: bump secure-gitops-pipeline image to ${{ needs.build-scan-push.outputs.image_tag }}"
+          git push
