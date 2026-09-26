@@ -116,7 +116,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ env.INFRA_REPO }}
-          token: ${{ secrets.INFRA_REPO_PAT }}
+          token: ${{ secrets.REPO_INFRA }}
           path: infra
 
       - name: Install kustomize
