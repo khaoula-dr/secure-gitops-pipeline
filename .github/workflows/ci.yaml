@@ -78,8 +78,14 @@ jobs:
 
       # Scan de l'image AVANT de la publier — on ne pousse jamais une image
       # non scannée sur le registre.
+      # NOTE SÉCURITÉ (mars 2026) : aquasecurity/trivy-action a subi une attaque de
+      # la chaîne d'approvisionnement — 76 des 77 anciens tags (dont ceux < v0.35.0)
+      # ont été force-pushés par un attaquant pour voler des credentials CI/CD.
+      # Seul le tag v0.35.0 était confirmé non compromis ; les tags récents utilisent
+      # désormais le préfixe "v". On épingle donc explicitement une version saine
+      # et récente, à re-vérifier périodiquement (https://github.com/aquasecurity/trivy-action/security/advisories).
       - name: Trivy scan (image)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}
           format: table
