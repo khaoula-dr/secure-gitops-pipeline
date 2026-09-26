@@ -48,5 +48,12 @@ def info():
 
 
 if __name__ == "__main__":
+    # Ce bloc ne sert que pour le développement local (`python app.py`).
+    # En production/conteneur, c'est gunicorn (voir Dockerfile) qui sert l'app
+    # et qui écoute sur 0.0.0.0 — nécessaire pour recevoir le trafic entrant
+    # du conteneur, avec l'isolation réseau du Pod comme protection.
+    # Le serveur de dev Flask, lui, n'a aucune raison d'être exposé au-delà
+    # de la machine locale : on limite donc son bind à 127.0.0.1 par défaut.
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    host = os.environ.get("FLASK_DEV_HOST", "127.0.0.1")
+    app.run(host=host, port=port)
