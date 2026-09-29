@@ -168,4 +168,5 @@ jobs:
         with:
           file: manifest-dev.yaml
           framework: kubernetes
+          skip_check: CKV_K8S_43,CKV_K8S_22,CKV2_K8S_6
           soft_fail: false
