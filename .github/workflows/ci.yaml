@@ -137,3 +137,35 @@ jobs:
           git add "${{ env.INFRA_OVERLAY_PATH }}/kustomization.yaml"
           git commit -m "chore: bump secure-gitops-pipeline image to ${{ needs.build-scan-push.outputs.image_tag }}"
           git push
+
+  # ---------------------------------------------------------------------
+  # 5. Scan des manifests Kubernetes résolus (Checkov) — US 4.1
+  #    Tourne après update-infra pour scanner le manifest avec le tag
+  #    d'image qui vient d'être poussé (kustomize build overlays/dev)
+  # ---------------------------------------------------------------------
+  scan-manifests:
+    name: Checkov (K8s manifests)
+    runs-on: ubuntu-latest
+    needs: update-infra
+    steps:
+      - name: Checkout infra repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.INFRA_REPO }}
+          token: ${{ secrets.REPO_INFRA }}
+          path: infra
+
+      - name: Install kustomize
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+
+      - name: Build resolved manifest (dev overlay)
+        run: kustomize build infra/${{ env.INFRA_OVERLAY_PATH }} > manifest-dev.yaml
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          file: manifest-dev.yaml
+          framework: kubernetes
+          soft_fail: false
