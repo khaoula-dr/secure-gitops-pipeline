@@ -11,6 +11,11 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 # ---------- Stage 2 : image d'exécution minimale ----------
 FROM python:3.12-slim
 
+# Mise à jour des paquets système — corrige les CVE connues de l'image de base
+# au moment du build (ex: CVE-2026-103111 sur libpcre2-8-0), plutôt que de
+# dépendre d'un tag d'image potentiellement figé avec des paquets obsolètes.
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+
 # Utilisateur non-root : requis par les règles de sécurité K8s (US 4.1 du cahier des charges)
 RUN addgroup --system app && adduser --system --ingroup app --home /home/app app
 

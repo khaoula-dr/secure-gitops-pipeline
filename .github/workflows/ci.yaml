@@ -74,6 +74,7 @@ jobs:
           context: .
           push: false
           load: true
+          pull: true
           tags: ${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}
 
       # Scan de l'image AVANT de la publier — on ne pousse jamais une image
