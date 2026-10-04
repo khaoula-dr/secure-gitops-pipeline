@@ -8,6 +8,24 @@ app = Flask(__name__)
 APP_NAME = os.environ.get("APP_NAME", "demo-api")
 APP_VERSION = os.environ.get("APP_VERSION", "dev")
 
+# Secret monté en fichier par Kubernetes (Sealed Secrets), chemin standard
+# pour un Secret monté en volume. Fallback sur une variable d'environnement
+# pour permettre l'exécution locale hors cluster (docker-compose, tests).
+API_KEY_FILE = os.environ.get("API_KEY_FILE", "/etc/secrets/API_KEY")
+
+
+def load_api_key():
+    """Lit le secret depuis le fichier monté par Kubernetes.
+    Ne jamais logguer ni exposer la valeur elle-même."""
+    try:
+        with open(API_KEY_FILE, "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return os.environ.get("API_KEY")
+
+
+API_KEY = load_api_key()
+
 
 @app.get("/")
 def root():
@@ -43,17 +61,15 @@ def info():
             "version": APP_VERSION,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "hostname": os.uname().nodename,
+            # Jamais la valeur du secret : juste une confirmation qu'il a
+            # été chargé avec succès, utile pour vérifier le déploiement
+            # sans jamais exposer de donnée sensible via l'API.
+            "api_key_loaded": API_KEY is not None,
         }
     )
 
 
 if __name__ == "__main__":
-    # Ce bloc ne sert que pour le développement local (`python app.py`).
-    # En production/conteneur, c'est gunicorn (voir Dockerfile) qui sert l'app
-    # et qui écoute sur 0.0.0.0 — nécessaire pour recevoir le trafic entrant
-    # du conteneur, avec l'isolation réseau du Pod comme protection.
-    # Le serveur de dev Flask, lui, n'a aucune raison d'être exposé au-delà
-    # de la machine locale : on limite donc son bind à 127.0.0.1 par défaut.
     port = int(os.environ.get("PORT", 8080))
     host = os.environ.get("FLASK_DEV_HOST", "127.0.0.1")
     app.run(host=host, port=port)
